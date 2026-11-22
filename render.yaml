@@ -1,0 +1,21 @@
+# Render (plano gratuito): servidor Node.js + site. O banco fica no Neon (PostgreSQL grátis).
+# No Render: New > Blueprint > escolha este repositório. Ele lê este arquivo sozinho.
+# Só o DATABASE_URL é pedido na criação (copie do painel do Neon, a versão "pooled").
+services:
+  - type: web
+    name: caixa-resina-postgresql
+    runtime: node
+    plan: free
+    region: virginia            # mesma região do Neon (us-east-1) = consultas mais rápidas
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start     # cria as tabelas que faltarem e sobe a API + o site
+    healthCheckPath: /api/saude
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production       # cookie da sessão só por https
+      - key: DATABASE_URL
+        sync: false             # o Render pede na criação; não fica no repositório
+      - key: JWT_SECRET
+        generateValue: true     # o Render gera um segredo aleatório

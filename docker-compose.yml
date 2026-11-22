@@ -1,0 +1,14 @@
+# PostgreSQL 17 com Docker: docker compose up -d
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: caixa
+      POSTGRES_PASSWORD: caixa
+      POSTGRES_DB: caixa
+    ports:
+      - "5432:5432"
+    volumes:
+      - dados:/var/lib/postgresql/data
+volumes:
+  dados:

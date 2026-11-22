@@ -1,0 +1,524 @@
+// Entende a planilha do caixa (o mesmo modelo do NOVO_CAIXA.xlsx) e monta o que será importado.
+//
+// Cada aba é um mês. Em cada aba:
+//   - Caixa: STATUS | D. PGTO | VENCIMENTO | CONTA BANCÁRIA | CATEGORIA | PESSOA | DESCRIÇÃO | REFERENCIA | PARCELA | DÉBITO/CRÉDITO
+//     (DÉBITO/CRÉDITO negativo = saída, positivo = entrada; STATUS "OK" = já pago)
+//   - Cartões: um bloco por cartão, com o nome do cartão na linha de cima:
+//     DATA COMPRA | PARCELA | CATEGORIA | SUBCATEGORIA | DESCRIÇÃO | REFERENCIA | VALOR
+//     (cada linha é a parcela que caiu na fatura daquele mês)
+// As colunas são achadas pelo título, então a ordem pode mudar um pouco sem problema.
+import { store } from './store.js';
+import { local } from './local-db.js';
+import { somarMeses } from './format.js';
+import { TIPO_PADRAO } from './exemplo.js';
+
+const MESES = ['JANEIRO', 'FEVEREIRO', 'MARCO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
+export const NOMES_MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+
+/** Texto para comparar: sem acento, maiúsculo, só letras e números ("T MP" = "TMP", "M.C. " = "MC") */
+export const chave = (t) => String(t ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const limpo = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+const pad = (n) => String(n).padStart(2, '0');
+const iso = (a, m, d) => `${a}-${pad(m)}-${pad(d)}`;
+const valida = (a, m, d) => m >= 1 && m <= 12 && d >= 1 && d <= new Date(a, m, 0).getDate();
+
+/** Mês escrito no nome da aba ("DEZEMBRO (2)", "Mar 2025", "dez-25") → {mes, ano} */
+export function mesDoNome(nome) {
+  const k = chave(nome);
+  const i = MESES.findIndex((m) => k.includes(m) || k.startsWith(m.slice(0, 3)));
+  const semCopia = String(nome).replace(/\(\d+\)/g, '').trim(); // "DEZEMBRO (2)" → "DEZEMBRO"
+  const ano4 = /(20\d\d)/.exec(semCopia)?.[1];
+  const ano2 = /[^\d](\d{2})$/.exec(semCopia)?.[1];
+  const ano = ano4 ? Number(ano4) : ano2 ? 2000 + Number(ano2) : null;
+  return { mes: i >= 0 ? i + 1 : null, ano };
+}
+
+/**
+ * Data de uma célula → "aaaa-mm-dd".
+ * Aceita data do Excel (número), "05/11/2026", "05/11/26", "2026-11-05" e "05/11" (sem ano).
+ * Sem ano: usa o ano do mês de referência; `antesDe` = a data não pode passar do mês de referência
+ * (compra no cartão sempre é antes da fatura).
+ */
+export function lerData(v, ref, { antesDe = false } = {}) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') {
+    if (v < 20000 || v > 80000) return null;
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000);
+    return iso(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+  }
+  const s = String(v).trim();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) return valida(+m[1], +m[2], +m[3]) ? iso(+m[1], +m[2], +m[3]) : null;
+  m = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?$/.exec(s);
+  if (!m) return null;
+  const d = +m[1], mes = +m[2];
+  let ano = m[3] ? +m[3] : null;
+  if (ano !== null && ano < 100) ano += 2000;
+  if (ano === null) {
+    ano = ref.ano;
+    if (antesDe && mes > ref.mes) ano--; // compra de dezembro na fatura de janeiro
+    else if (!antesDe && mes - ref.mes > 6) ano--;
+    else if (!antesDe && ref.mes - mes > 6) ano++;
+  }
+  return valida(ano, mes, d) ? iso(ano, mes, d) : null;
+}
+
+/** Número de uma célula: 150, "-150,50", "R$ 1.234,56", "(80,00)" → número (ou null) */
+export function lerNumero(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? Math.round(v * 100) / 100 : null;
+  if (v == null) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  const negativo = /^\(.*\)$/.test(s) || /^-|^R\$\s*-|−/.test(s);
+  s = s.replace(/[^\d,.]/g, '');
+  if (!s) return null;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round((negativo ? -n : n) * 100) / 100 : null;
+}
+
+/**
+ * Texto da parcela: "2/6", "2 de 6". Se o Excel transformou "2/6" em data (2 de junho),
+ * o dia é a parcela e o mês é o total.
+ */
+export function lerParcela(v) {
+  if (typeof v === 'number' && v > 20000 && v < 80000) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000);
+    return { numero: d.getUTCDate(), total: d.getUTCMonth() + 1, texto: `${d.getUTCDate()}/${d.getUTCMonth() + 1}` };
+  }
+  const m = /(\d+)\s*(?:\/|de|DE)\s*(\d+)/.exec(String(v ?? ''));
+  if (m && +m[2] >= 1 && +m[1] >= 1 && +m[1] <= +m[2] && +m[2] <= 72) return { numero: +m[1], total: +m[2], texto: `${+m[1]}/${+m[2]}` };
+  return null;
+}
+
+/** Acha os títulos das colunas da aba. Retorna null se a aba não for do modelo do caixa. */
+function lerTitulos(linhas) {
+  for (let l = 0; l < Math.min(linhas.length, 8); l++) {
+    const t = (linhas[l] || []).map(chave);
+    const col = (nome, desde = 0, ate = t.length) => {
+      for (let i = desde; i < ate; i++) if (t[i] === nome) return i;
+      return -1;
+    };
+    const valor = [col('DEBITOCREDITO'), col('DEBITOECREDITO'), col('VALOR')].find((i) => i >= 0) ?? -1;
+    const blocos = [];
+    t.forEach((x, i) => {
+      if (x !== 'DATACOMPRA') return;
+      const ate = i + 9;
+      const b = {
+        data: i, parcela: col('PARCELA', i, ate), categoria: col('CATEGORIA', i, ate), sub: col('SUBCATEGORIA', i, ate),
+        descricao: col('DESCRICAO', i, ate), referencia: col('REFERENCIA', i, ate), valor: col('VALOR', i, ate),
+      };
+      // nome do cartão: na linha de cima, perto do bloco
+      const cima = linhas[l - 1] || [];
+      for (let j = i - 2; j <= b.valor && !b.cartao; j++) if (typeof cima[j] === 'string' && cima[j].trim()) b.cartao = cima[j].trim();
+      // mês escrito no título do bloco (ex.: "DEZEMBRO" logo antes de DATA COMPRA)
+      b.mesTitulo = typeof linhas[l][i - 1] === 'string' ? linhas[l][i - 1] : null;
+      if (b.valor > i) blocos.push(b);
+    });
+    const fimCaixa = blocos.length ? blocos[0].data : t.length;
+    const caixa = {
+      status: col('STATUS', 0, fimCaixa), pagamento: col('DPGTO', 0, fimCaixa) >= 0 ? col('DPGTO', 0, fimCaixa) : col('DATAPAGAMENTO', 0, fimCaixa),
+      vencimento: col('VENCIMENTO', 0, fimCaixa), conta: [col('CONTABANCARIA', 0, fimCaixa), col('CONTA', 0, fimCaixa)].find((i) => i >= 0) ?? -1,
+      categoria: col('CATEGORIA', 0, fimCaixa), pessoa: col('PESSOA', 0, fimCaixa), descricao: col('DESCRICAO', 0, fimCaixa),
+      referencia: col('REFERENCIA', 0, fimCaixa), parcela: col('PARCELA', 0, fimCaixa), valor: valor < fimCaixa ? valor : -1,
+    };
+    // precisa das colunas próprias do modelo (STATUS ou VENCIMENTO), não basta ter Descrição e Valor
+    const temCaixa = caixa.valor >= 0 && (caixa.descricao >= 0 || caixa.categoria >= 0) && (caixa.status >= 0 || caixa.vencimento >= 0);
+    if (temCaixa || blocos.length) return { linha: l, caixa: temCaixa ? caixa : null, blocos };
+  }
+  return null;
+}
+
+/** Linha de total do modelo (ex.: "TOTAL FATURA" com a soma embaixo de cada cartão) */
+const TOTAL = /^(TOTAL|SOMA|SUBTOTAL)/;
+
+const PULAR = Symbol('pular');
+const PENDENTE = Symbol('pendente');
+
+const SALDO_ANTERIOR = /SALDOANTERIOR|SALDOINICIAL|SALDODOMESANTERIOR|SALDOMESANTERIOR|TRANSPORTE/;
+
+/**
+ * Primeira leitura do arquivo: quais abas são do modelo e qual mês cada uma parece ser.
+ * @returns {{nome, titulos, linhas, mes, ano, vazia, oculta}[]}
+ */
+export function reconhecerAbas(abas) {
+  const hoje = new Date();
+  const lidas = abas.map((a) => {
+    const titulos = lerTitulos(a.linhas);
+    if (!titulos) return { nome: a.nome, modelo: false };
+    const pelo = mesDoNome(a.nome);
+    if (!pelo.mes) {
+      const t = titulos.blocos.map((b) => b.mesTitulo).find((x) => x && mesDoNome(x).mes);
+      if (t) pelo.mes = mesDoNome(t).mes;
+    }
+    // datas de vencimento ajudam a descobrir o ano (e o mês, se o nome não disser)
+    const datas = [];
+    if (titulos.caixa) {
+      for (let l = titulos.linha + 1; l < a.linhas.length; l++) {
+        const v = a.linhas[l]?.[titulos.caixa.vencimento];
+        // só datas completas (com ano) servem para descobrir o mês e o ano da aba
+        const completa = typeof v === 'number' || /^\d{4}-\d|^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/.test(String(v ?? '').trim());
+        const d = completa ? lerData(v, { ano: 2000, mes: 1 }) : null;
+        if (d) datas.push(d);
+      }
+    }
+    const moda = (lista) => {
+      const c = new Map();
+      lista.forEach((x) => c.set(x, (c.get(x) || 0) + 1));
+      return [...c.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? null;
+    };
+    const mes = pelo.mes ?? (moda(datas.map((d) => +d.slice(5, 7))) || null);
+    const ano = pelo.ano ?? moda(datas.filter((d) => +d.slice(5, 7) === mes).map((d) => +d.slice(0, 4))) ?? moda(datas.map((d) => +d.slice(0, 4)));
+    return { nome: a.nome, modelo: true, oculta: a.oculta, titulos, linhas: a.linhas, mes, ano, anoAdivinhado: !ano };
+  });
+  // ano não encontrado: o ano atual (ou o anterior, se o mês ainda não chegou)
+  for (const a of lidas) {
+    if (!a.modelo || a.ano) continue;
+    a.ano = a.mes && a.mes > hoje.getMonth() + 1 ? hoje.getFullYear() - 1 : hoje.getFullYear();
+  }
+  return lidas;
+}
+
+/**
+ * Monta o plano de importação para as abas escolhidas.
+ * @param {ReturnType<typeof reconhecerAbas>} abas
+ * @param {Record<string, {usar: boolean, mes: number, ano: number}>} escolhas por nome da aba
+ * @param {Record<string, 'criar'|'pular'|{usar: string}>} resolucoes decisão para cada pendência (chave "tipo:NOME")
+ */
+export function montarPlano(abas, escolhas, resolucoes = {}) {
+  const avisos = [];
+  const novos = { contas: [], cartoes: [], categorias: [], pessoas: [] };
+  const tiposUsados = new Map(); // categoria id → Set(tipos) para ajustar o tipo depois
+  const t = local.tabelas();
+  const semDados = !t.lancamentos.length && !t.compras_cartao.length;
+
+  // --- cadastros: acha pelo nome. Categoria, conta ou cartão que NÃO existe no sistema vira uma
+  // pendência: a pessoa decide (criar com o mesmo nome, usar um que já existe ou não importar as linhas).
+  const pendentes = new Map();
+  const criados = new Map();
+  const NOMES_LISTA = { categorias: 'categoria', contas: 'conta', cartoes: 'cartao' };
+  const semCartao = (n) => chave(n).replace(/^CARTAO(DE)?(CREDITO)?/, '');
+  const existente = (lista, nome) => {
+    const k = lista === 'cartoes' ? semCartao(nome) : chave(nome);
+    if (!k) return null;
+    return store[lista].find((x) => {
+      if (lista !== 'cartoes') return chave(x.nome) === k;
+      const kc = semCartao(x.nome);
+      return kc && (kc === k || k.includes(kc) || kc.includes(k));
+    }) || null;
+  };
+  /**
+   * @param {'categorias'|'contas'|'cartoes'} lista
+   * @param {string} nome nome como está na planilha ('' = célula vazia)
+   * @param {{aba: string, linha: number, texto: string}} onde para mostrar à pessoa
+   * @returns item do sistema | PULAR | PENDENTE
+   */
+  const resolver = (lista, nome, onde, criar, quantas = 1) => {
+    const achado = existente(lista, nome);
+    if (achado) return achado;
+    const tipo = NOMES_LISTA[lista];
+    const k = `${tipo}:${chave(nome)}`;
+    const p = pendentes.get(k) || pendentes.set(k, { chave: k, tipo, lista, nome: limpo(nome), linhas: 0, exemplos: [] }).get(k);
+    p.linhas += quantas;
+    if (p.exemplos.length < 3) p.exemplos.push(onde);
+    const r = resolucoes[k];
+    if (r === 'pular') return PULAR;
+    if (r?.usar) return store[lista].find((x) => x.id === r.usar) || PENDENTE;
+    if (r === 'criar') {
+      if (!criados.has(k)) {
+        const item = { id: crypto.randomUUID(), ...criar(limpo(nome)) };
+        criados.set(k, item);
+        novos[lista].push(item);
+      }
+      return criados.get(k);
+    }
+    return PENDENTE;
+  };
+  const conta = (nome, onde) => resolver('contas', nome, onde, (n) => ({ nome: n || 'Sem conta', saldo_inicial: 0, ativa: true }));
+  const cartao = (nome, onde, quantas) => resolver('cartoes', nome, onde, (n) => ({
+    nome: n.replace(/^cart[aã]o\s+/i, '').replace(/^\w/, (c) => c.toUpperCase()) || 'Cartão', dia_fechamento: 1, dia_vencimento: 10, ativo: true,
+  }), quantas);
+  const categoria = (nome, tipo, onde) => {
+    const c = resolver('categorias', nome, onde, (n) => ({ nome: n || 'Sem categoria', grupo: 'Outros', no_grafico: false, tipo: TIPO_PADRAO[n] || tipo }));
+    if (c !== PULAR && c !== PENDENTE) (tiposUsados.get(c.id) || tiposUsados.set(c.id, new Set()).get(c.id)).add(tipo);
+    return c;
+  };
+  // pessoa é um campo livre: se não existir, é criada sem perguntar
+  const pessoa = (nome) => {
+    if (!limpo(nome)) return null;
+    const k = chave(nome);
+    const achada = store.pessoas.find((x) => chave(x.nome) === k) || novos.pessoas.find((x) => chave(x.nome) === k);
+    if (achada) return achada;
+    const item = { id: crypto.randomUUID(), nome: limpo(nome), tipo: 'Outro' };
+    novos.pessoas.push(item);
+    return item;
+  };
+  let linhasPuladas = 0, linhasPendentes = 0;
+  /** true se a linha não entra (pulada ou esperando decisão) */
+  const fora = (...itens) => {
+    if (itens.includes(PULAR)) { linhasPuladas++; return true; }
+    if (itens.includes(PENDENTE)) { linhasPendentes++; return true; }
+    return false;
+  };
+
+  // --- duplicados: compara com o que já está no sistema (contando repetições)
+  const contagem = (lista) => {
+    const m = new Map();
+    lista.forEach((k) => m.set(k, (m.get(k) || 0) + 1));
+    return m;
+  };
+  const kLanc = (l) => [l.tipo, l.vencimento, Number(l.valor).toFixed(2), chave(l.descricao)].join('|');
+  const kCompra = (c) => [c.cartao_id, c.data_compra, chave(c.descricao), c.qtd_parcelas, c.qtd_parcelas === 1 ? Number(c.valor_total).toFixed(2) : ''].join('|');
+  const jaTemLanc = contagem(t.lancamentos.map(kLanc));
+  const jaTemCompra = contagem(t.compras_cartao.map(kCompra));
+  const repetido = (mapa, k) => (mapa.get(k) > 0 ? (mapa.set(k, mapa.get(k) - 1), true) : false);
+
+  const usadas = abas.filter((a) => a.modelo && escolhas[a.nome]?.usar)
+    .map((a) => ({ ...a, mes: escolhas[a.nome].mes, ano: escolhas[a.nome].ano }))
+    .sort((a, b) => a.ano - b.ano || a.mes - b.mes);
+  const primeira = usadas[0];
+  // nomes dos cartões que têm bloco na planilha (para reconhecer o pagamento da fatura antes de ler o bloco)
+  const cartoesDaPlanilha = [...new Set(usadas.flatMap((a) => a.titulos.blocos.map((b) => b.cartao).filter(Boolean)))];
+
+  // mesmo mês em duas abas: pode ser cópia
+  const vistos = new Map();
+  usadas.forEach((a) => {
+    const k = `${a.ano}-${a.mes}`;
+    if (vistos.has(k)) avisos.push(`As abas "${vistos.get(k)}" e "${a.nome}" são as duas de ${NOMES_MESES[a.mes - 1].toLowerCase()} de ${a.ano}. Confira se uma não é cópia da outra.`);
+    vistos.set(k, a.nome);
+  });
+
+  const lancamentos = [];
+  const saldosIniciais = new Map();
+  const linhasCartao = [];
+  const resumoAbas = new Map(usadas.map((a) => [a.nome, { caixa: 0, cartao: 0 }]));
+  let repetidos = 0, saldoAnteriorIgnorado = 0, faturas = 0;
+  const aviso = (a, l, msg) => avisos.push(`${a.nome}, linha ${l + 1}: ${msg}`);
+
+  for (const a of usadas) {
+    const ref = { ano: a.ano, mes: a.mes };
+    const mesISO = iso(a.ano, a.mes, 1);
+    const { caixa, blocos } = a.titulos;
+    const cel = (linha, i) => (i >= 0 ? linha[i] : null);
+
+    // ----- caixa
+    if (caixa) {
+      for (let l = a.titulos.linha + 1; l < a.linhas.length; l++) {
+        const r = a.linhas[l] || [];
+        const desc = limpo(cel(r, caixa.descricao));
+        const cat = limpo(cel(r, caixa.categoria));
+        const bruto = cel(r, caixa.valor);
+        if (!desc && !cat && (bruto == null || bruto === '')) continue; // linha vazia (ou só com a fórmula do saldo)
+        if (TOTAL.test(chave(desc)) || TOTAL.test(chave(cat))) continue;
+        const v = lerNumero(bruto);
+        if (!v) { aviso(a, l, `"${desc || cat}" está sem valor e não foi importado.`); continue; }
+        if (Math.abs(v) > 99_999_999.99) { aviso(a, l, `"${desc || cat}" tem valor acima do limite e não foi importado.`); continue; }
+        const tipo = v > 0 ? 'entrada' : 'saida';
+        const onde = { aba: a.nome, linha: l + 1, texto: desc || cat };
+        const contaItem = conta(cel(r, caixa.conta), onde);
+        if (fora(contaItem)) continue;
+
+        if (SALDO_ANTERIOR.test(chave(desc)) || SALDO_ANTERIOR.test(chave(cat))) {
+          // saldo que vem do mês anterior: o sistema calcula sozinho; só a 1ª aba vira saldo inicial
+          if (a === primeira && semDados) saldosIniciais.set(contaItem.id, { nome: contaItem.nome, valor: (saldosIniciais.get(contaItem.id)?.valor || 0) + v });
+          else saldoAnteriorIgnorado++;
+          continue;
+        }
+
+        const pago = ['OK', 'PAGO', 'RECEBIDO', 'SIM', 'X'].includes(chave(cel(r, caixa.status)));
+        const venc = lerData(cel(r, caixa.vencimento), ref) || lerData(cel(r, caixa.pagamento), ref) || mesISO;
+        const dataPgto = pago ? lerData(cel(r, caixa.pagamento), ref) || venc : null;
+        const parc = cel(r, caixa.parcela);
+        const textoParcela = lerParcela(parc)?.texto || (typeof parc === 'number' ? '' : limpo(parc));
+        // REFERENCIA vira a observação do lançamento; PARCELA ("11/12") fica no campo da parcela
+        const referencia = limpo(cel(r, caixa.referencia));
+        const descricao = (desc || cat || 'Sem descrição').slice(0, 120);
+
+        // pagamento de fatura de cartão (ex.: categoria "Fatura Nubank" ou "Cartão Mercado Pago")
+        const textoTodo = chave(`${cat} ${desc}`);
+        let cartaoPago = tipo === 'saida' && /FATURA|CARTAO/.test(textoTodo) && !store.categorias.some((c) => chave(c.nome) === chave(cat))
+          ? [...store.cartoes, ...criados.values()].filter((c) => 'dia_fechamento' in c).find((c) => textoTodo.includes(chave(c.nome).replace(/^CARTAO/, ''))) || null
+          : null;
+        // cartão que ainda não existe no sistema, mas tem bloco na planilha (ex.: "FATURA CARTÃO MARIA" e o bloco "CARTÃO MARIA")
+        if (!cartaoPago && tipo === 'saida' && /FATURA/.test(textoTodo) && !store.categorias.some((c) => chave(c.nome) === chave(cat))) {
+          const doBloco = cartoesDaPlanilha.find((n) => semCartao(n) && textoTodo.includes(semCartao(n)));
+          if (doBloco) {
+            const c = cartao(doBloco, onde);
+            if (fora(c)) continue;
+            cartaoPago = c;
+          }
+        }
+
+        const catItem = cartaoPago ? null : categoria(cat, tipo, onde);
+        if (fora(catItem)) continue;
+        // "Fatura 12/2026" na REFERENCIA diz de qual fatura é o pagamento (planilha gerada pelo sistema)
+        const mesFatura = /(\d{1,2})\/(\d{4})/.exec(referencia);
+        const faturaMes = cartaoPago && mesFatura && /FATURA/.test(chave(referencia)) && +mesFatura[1] >= 1 && +mesFatura[1] <= 12
+          ? iso(+mesFatura[2], +mesFatura[1], 1) : mesISO;
+        const item = {
+          id: crypto.randomUUID(), tipo, valor: Math.abs(v), descricao, vencimento: venc, pago, data_pagamento: dataPgto,
+          conta_id: contaItem.id, pessoa_id: pessoa(cel(r, caixa.pessoa))?.id ?? null, origem: 'planilha',
+          categoria_id: catItem?.id ?? null,
+          observacao: cartaoPago || !referencia ? null : referencia.slice(0, 500),
+          parcela: textoParcela ? textoParcela.slice(0, 20) : null,
+          ...(cartaoPago ? { fatura_cartao_id: cartaoPago.id, fatura_mes: faturaMes, ...(/ADIANTAMENTO/.test(textoTodo) ? { adiantamento: true } : {}) } : {}),
+        };
+        if (repetido(jaTemLanc, kLanc(item))) { repetidos++; continue; }
+        if (cartaoPago) faturas++;
+        lancamentos.push(item);
+        resumoAbas.get(a.nome).caixa++;
+      }
+    }
+
+    // ----- cartões
+    for (const b of blocos) {
+      // conta as linhas do bloco antes, para a pendência do cartão dizer quantas são
+      const linhasDoBloco = [];
+      for (let l = a.titulos.linha + 1; l < a.linhas.length; l++) {
+        const r = a.linhas[l] || [];
+        if (!limpo(cel(r, b.descricao)) && !limpo(cel(r, b.categoria)) && (cel(r, b.valor) == null || cel(r, b.valor) === '')) continue;
+        if ([b.data - 1, b.data, b.categoria, b.descricao].some((i) => i >= 0 && TOTAL.test(chave(r[i])))) continue;
+        linhasDoBloco.push(l);
+      }
+      if (!linhasDoBloco.length) continue;
+      const nomeCartao = b.cartao || `Cartão ${blocos.indexOf(b) + 1}`;
+      const cartaoItem = cartao(nomeCartao, { aba: a.nome, linha: linhasDoBloco[0] + 1, texto: `bloco do ${limpo(nomeCartao)}` }, linhasDoBloco.length);
+      if (cartaoItem === PULAR) { linhasPuladas += linhasDoBloco.length; continue; }
+      if (cartaoItem === PENDENTE) { linhasPendentes += linhasDoBloco.length; continue; }
+      // sinal das compras: tem planilha que lança o gasto no cartão positivo e tem que lança negativo
+      // (como no caixa). Vale o que for maioria no bloco; o sinal contrário é estorno.
+      let negativos = 0, positivos = 0;
+      for (let l = a.titulos.linha + 1; l < a.linhas.length; l++) {
+        const r = a.linhas[l] || [];
+        if ([b.data - 1, b.data, b.categoria, b.descricao].some((i) => i >= 0 && TOTAL.test(chave(r[i])))) continue;
+        const n = lerNumero(cel(r, b.valor));
+        if (n < 0) negativos++;
+        else if (n > 0) positivos++;
+      }
+      const sinal = negativos > positivos ? -1 : 1;
+      for (let l = a.titulos.linha + 1; l < a.linhas.length; l++) {
+        const r = a.linhas[l] || [];
+        const desc = limpo(cel(r, b.descricao));
+        const cat = limpo(cel(r, b.categoria));
+        const bruto = cel(r, b.valor);
+        if (!desc && !cat && (bruto == null || bruto === '')) continue;
+        // linha "TOTAL FATURA" (fica na coluna do mês, antes de DATA COMPRA) não é compra
+        if ([b.data - 1, b.data, b.categoria, b.descricao].some((i) => i >= 0 && TOTAL.test(chave(r[i])))) continue;
+        const v = (lerNumero(bruto) ?? 0) * sinal;
+        if (!v) { aviso(a, l, `compra "${desc || cat}" no ${cartaoItem.nome} está sem valor e não foi importada.`); continue; }
+        const catItem = categoria(cat, 'saida', { aba: a.nome, linha: l + 1, texto: desc || cat });
+        if (fora(catItem)) continue;
+        const estorno = v < 0; // sinal contrário ao das compras: reembolso/estorno (abate a fatura)
+        const { numero, total } = (!estorno && lerParcela(cel(r, b.parcela))) || { numero: 1, total: 1 };
+        // sem data da compra: considera o dia 1º do mês da 1ª parcela
+        const dataCompra = lerData(cel(r, b.data), ref, { antesDe: true }) || somarMeses(mesISO, -(numero - 1));
+        const textoRef = limpo(cel(r, b.referencia));
+        linhasCartao.push({
+          aba: a.nome, cartao: cartaoItem, numero, total, valor: v, fatura: mesISO, data: dataCompra, estorno,
+          descricao: [desc || cat || (estorno ? 'Reembolso' : 'Compra no cartão'), chave(textoRef) === 'REEMBOLSO' ? '' : textoRef].filter(Boolean).join(' ').slice(0, 120),
+          categoria: catItem, sub: limpo(cel(r, b.sub)) || null,
+        });
+        resumoAbas.get(a.nome).cartao++;
+      }
+    }
+  }
+
+  // ----- junta as parcelas da mesma compra (que aparecem em meses diferentes) e completa as que faltam
+  const grupos = [];
+  for (const x of linhasCartao) {
+    const k = [x.cartao.id, x.data, chave(x.descricao), x.total, x.estorno ? 'E' : ''].join('|');
+    const g = x.total > 1 && grupos.find((y) => y.k === k && !y.parcelas.has(x.numero));
+    if (g) g.parcelas.set(x.numero, x);
+    else grupos.push({ k, x, parcelas: new Map([[x.numero, x]]) });
+  }
+  const compras = [];
+  for (const g of grupos) {
+    const { x } = g;
+    const conhecidas = [...g.parcelas.values()].sort((a, b) => a.numero - b.numero);
+    const base = conhecidas[0];
+    const parcelas = Array.from({ length: x.total }, (_, i) => {
+      const n = i + 1;
+      const achada = g.parcelas.get(n);
+      const perto = achada || conhecidas.reduce((m, c) => (Math.abs(c.numero - n) < Math.abs(m.numero - n) ? c : m), base);
+      return { id: crypto.randomUUID(), numero: n, valor: perto.valor, fatura_mes: achada ? achada.fatura : somarMeses(base.fatura, n - base.numero) };
+    });
+    const compra = {
+      id: crypto.randomUUID(), cartao_id: x.cartao.id, data_compra: x.data, descricao: x.descricao,
+      categoria_id: x.categoria?.id ?? null, subcategoria: x.sub, qtd_parcelas: x.total, origem: 'planilha',
+      // reembolso: a parcela fica negativa e o total positivo (como no Novo lançamento)
+      valor_total: Math.abs(Math.round(parcelas.reduce((s, p) => s + p.valor, 0) * 100) / 100),
+      tipo: x.estorno ? 'estorno' : 'compra',
+    };
+    if (repetido(jaTemCompra, kCompra(compra))) { repetidos++; continue; }
+    compras.push({ compra, parcelas: parcelas.map((p) => ({ ...p, compra_id: compra.id })), completadas: x.total - g.parcelas.size });
+  }
+  const parcelasCompletadas = compras.reduce((s, c) => s + c.completadas, 0);
+
+  // ----- categorias que já existiam mas foram usadas no outro tipo viram "os dois"
+  const mudarTipo = [];
+  for (const [id, tipos] of tiposUsados) {
+    const c = store.categorias.find((x) => x.id === id) || novos.categorias.find((x) => x.id === id);
+    if (!c) continue;
+    const precisa = tipos.size > 1 ? 'ambos' : [...tipos][0];
+    const atual = c.tipo || 'saida';
+    if (atual !== 'ambos' && atual !== precisa) {
+      if (novos.categorias.includes(c)) c.tipo = 'ambos';
+      else mudarTipo.push({ id, nome: c.nome, tipo: 'ambos' });
+    }
+  }
+
+  if (saldoAnteriorIgnorado) avisos.push(`${saldoAnteriorIgnorado} linha(s) de "saldo anterior" não foram importadas: o sistema calcula o saldo de cada mês sozinho.`);
+  // pendências com a sugestão do nome mais parecido que já existe no sistema
+  const listaPendentes = [...pendentes.values()].map((p) => ({
+    ...p,
+    sugestao: p.nome ? parecido(store[p.lista], p.nome) : null,
+    resolucao: resolucoes[p.chave] ?? null,
+    resolvida: resolucoes[p.chave] === 'pular' || resolucoes[p.chave] === 'criar' || !!(resolucoes[p.chave]?.usar && store[p.lista].some((x) => x.id === resolucoes[p.chave].usar)),
+  }));
+
+  return {
+    pendentes: listaPendentes,
+    faltaResolver: listaPendentes.filter((p) => !p.resolvida).length,
+    linhasPendentes,
+    linhasPuladas,
+    abas: usadas.map((a) => ({ nome: a.nome, mes: a.mes, ano: a.ano, ...resumoAbas.get(a.nome) })),
+    lancamentos, compras, novos, mudarTipo, saldosIniciais, avisos, repetidos, faturas,
+    parcelasCompletadas,
+    total: lancamentos.length + compras.length,
+  };
+}
+
+/** Nome mais parecido de uma lista (ex.: "Alimentacao" → "Alimentação/Produtos Limpeza"), ou null */
+export function parecido(lista, nome) {
+  const k = chave(nome);
+  if (k.length < 3) return null;
+  let melhor = null, nota = 0;
+  for (const item of lista) {
+    const ki = chave(item.nome);
+    if (!ki) continue;
+    let n;
+    if (ki.includes(k) || k.includes(ki)) n = 0.9 * Math.min(k.length, ki.length) / Math.max(k.length, ki.length) + 0.1;
+    else n = 1 - distancia(k, ki) / Math.max(k.length, ki.length);
+    // primeira palavra igual (ex.: "Despesas Fazenda" x "Despesa fazenda")
+    const p1 = chave(String(nome).split(/[\s/]/)[0]), p2 = chave(String(item.nome).split(/[\s/]/)[0]);
+    if (p1.length >= 4 && p1 === p2) n = Math.max(n, 0.7);
+    if (p1.length >= 5 && (p2.startsWith(p1) || p1.startsWith(p2))) n = Math.max(n, 0.65);
+    if (n > nota) { nota = n; melhor = item; }
+  }
+  return nota >= 0.6 ? { id: melhor.id, nome: melhor.nome } : null;
+}
+
+function distancia(a, b) {
+  const d = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let anterior = d[0];
+    d[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const guardado = d[j];
+      d[j] = Math.min(d[j] + 1, d[j - 1] + 1, anterior + (a[i - 1] === b[j - 1] ? 0 : 1));
+      anterior = guardado;
+    }
+  }
+  return d[b.length];
+}

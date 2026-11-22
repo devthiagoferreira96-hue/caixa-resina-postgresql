@@ -1,0 +1,30 @@
+{
+  "name": "caixa-resina-postgresql",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Caixa + Resina com servidor Node.js (Express) e banco PostgreSQL",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "vite",
+    "servidor": "node --env-file-if-exists=.env --watch server/index.js",
+    "db:local": "node scripts/pg-local.mjs",
+    "db:migrar": "node --env-file-if-exists=.env server/migrar.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node tests/regras.test.js && node --test tests/servidor.test.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.17",
+    "@electric-sql/pglite-socket": "^0.2.20",
+    "@tailwindcss/vite": "^4.1.0",
+    "tailwindcss": "^4.1.0",
+    "vite": "^6.3.0"
+  }
+}

@@ -1,0 +1,170 @@
+// Estrutura fixa da tela: menu lateral (computador), menu de baixo (celular) e cabeçalho
+import { esc, nomeMes, inicioMes } from '../lib/format.js';
+import { store } from '../lib/store.js';
+import { icone } from '../lib/ui.js';
+import { iconeAnimado, ligarIconesAnimados } from './icones-animados.js';
+import { resinaAtiva } from '../modulos/resina/dados.js';
+
+const MENU = [
+  ['inicio', 'Início', 'inicio'],
+  ['extrato', 'Extrato', 'extrato'],
+  ['cartoes', 'Cartões', 'cartao'],
+  ['relatorio', 'Relatório', 'relatorio'],
+  ['ajustes', 'Ajustes', 'ajustes'],
+  ['ajuda', 'Como usar', 'ajuda'],
+];
+const MENU_RESINA = [
+  ['resina', 'Produção', 'tambor'],
+  ['cargas', 'Cargas', 'caminhao'],
+  ['insumos', 'Insumos', 'insumo'],
+  ['conta-corrente', 'Conta corrente', 'extrato'],
+  ['resina-cadastros', 'Cadastros', 'cadastros'],
+  ['ajustes', 'Ajustes', 'ajustes'],
+  ['ajuda', 'Como usar', 'ajuda'],
+];
+// Seletor de módulo: Caixa da família, Produção da resina e Cargas da resina
+const MODULOS = [
+  ['caixa', 'inicio', 'Caixa familiar', 'inicio'],
+  ['producao', 'resina', 'Produção resina', 'tambor'],
+  ['carga', 'cargas', 'Carga resina', 'caminhao'],
+];
+const ROTAS_RESINA = { resina: 'producao', 'resina-cadastros': 'producao', cargas: 'carga', carga: 'carga', 'conta-corrente': 'carga', insumos: 'producao' };
+let moduloAtual = 'caixa', seletorAtual = 'caixa';
+
+const seletorModulos = (classe) => `
+  <nav aria-label="Escolher módulo" data-seletor-modulo class="${classe}">
+    <ul class="seletor-modulo">${MODULOS.map(([id, rota, nome, ic]) =>
+      `<li><a href="#${rota}" data-modulo-link="${id}" data-anima>${iconeAnimado(ic, 'size-4')}<span>${nome}</span></a></li>`).join('')}</ul>
+  </nav>`;
+
+export function montarLayout() {
+  document.getElementById('app').innerHTML = `
+    <a href="#conteudo" data-pular class="sr-only z-[70] focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:rounded-xl focus:bg-brand-700 focus:px-4 focus:py-3 focus:font-semibold focus:text-white">Pular para o conteúdo</a>
+
+    <aside class="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-stone-200 bg-cartao p-4 lg:flex dark:border-stone-800 dark:bg-stone-900">
+      <div class="flex items-center gap-3 px-2 pb-6">
+        <span class="flex size-10 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white" aria-hidden="true">R$</span>
+        <div class="min-w-0"><p class="font-bold">Caixa da Família</p><p class="truncate text-sm text-stone-600 dark:text-stone-400" data-saudacao>Olá, ${esc(store.usuario)}</p></div>
+      </div>
+      ${seletorModulos('mb-4 hidden')}
+      <a href="#novo" data-nav="novo" data-menu="caixa" data-anima class="btn-primario mb-4 w-full">${iconeAnimado('mais')} Novo lançamento</a>
+      <a href="#carga" data-nav="carga" data-menu="resina" data-anima class="btn-primario mb-4 hidden w-full">${iconeAnimado('mais')} Nova carga</a>
+      <nav aria-label="Menu principal">
+        <ul class="grid gap-1" data-menu="caixa">${MENU.map(([rota, nome, ic]) => `<li><a href="#${rota}" data-nav="${rota}" data-anima class="nav-link">${iconeAnimado(ic)}<span>${nome}</span></a></li>`).join('')}</ul>
+        <ul class="hidden gap-1" data-menu="resina">${MENU_RESINA.map(([rota, nome, ic]) => `<li><a href="#${rota}" data-nav="${rota}" data-anima class="nav-link">${iconeAnimado(ic)}<span>${nome}</span></a></li>`).join('')}</ul>
+      </nav>
+      <button type="button" data-bloquear data-anima class="nav-link mt-auto w-full cursor-pointer">${iconeAnimado('cadeado')}<span>Bloquear</span></button>
+    </aside>
+
+    <div class="lg:pl-64">
+      <header class="sticky top-0 z-20 border-b border-transparent bg-fundo/90 pt-[env(safe-area-inset-top)] backdrop-blur dark:bg-stone-950/90">
+        <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3 lg:px-8 lg:py-5">
+          <h1 id="titulo-pagina" tabindex="-1" class="min-w-0 flex-1 truncate text-xl font-bold outline-none lg:text-2xl"></h1>
+          <div id="seletor-mes" class="order-last w-full sm:order-none sm:w-auto"></div>
+          <button type="button" id="btn-ajuda" data-anima class="btn-icone" aria-label="Ajuda desta tela" title="Ajuda desta tela">${iconeAnimado('ajuda')}</button>
+          <a href="#ajustes" data-anima class="btn-icone lg:hidden" aria-label="Ajustes" title="Ajustes">${iconeAnimado('ajustes')}</a>
+          <button type="button" data-bloquear data-anima class="btn-icone lg:hidden" aria-label="Bloquear o sistema" title="Bloquear">${iconeAnimado('cadeado')}</button>
+          ${seletorModulos('order-first hidden w-full lg:!hidden')}
+        </div>
+      </header>
+      <main id="conteudo" tabindex="-1" class="mx-auto max-w-6xl px-4 pt-1 pb-32 outline-none lg:px-8 lg:pb-12"></main>
+    </div>
+
+    <nav aria-label="Menu principal" class="fixed inset-x-0 bottom-0 z-30 border-t border-stone-200 bg-cartao pb-[env(safe-area-inset-bottom)] lg:hidden dark:border-stone-800 dark:bg-stone-900">
+      <ul class="mx-auto grid max-w-lg grid-cols-5 items-end" data-menu="caixa">
+        ${navBaixo('inicio', 'Início', 'inicio')}
+        ${navBaixo('extrato', 'Extrato', 'extrato')}
+        ${botaoMais('novo', 'Novo lançamento')}
+        ${navBaixo('cartoes', 'Cartões', 'cartao')}
+        ${navBaixo('relatorio', 'Relatório', 'relatorio')}
+      </ul>
+      <ul class="mx-auto hidden max-w-lg grid-cols-5 items-end" data-menu="resina">
+        ${navBaixo('resina', 'Produção', 'tambor')}
+        ${navBaixo('cargas', 'Cargas', 'caminhao')}
+        ${botaoMais('carga', 'Nova carga')}
+        ${navBaixo('conta-corrente', 'Conta', 'extrato')}
+        ${navBaixo('resina-cadastros', 'Cadastro', 'cadastros')}
+      </ul>
+    </nav>
+    <div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-24 z-[60] flex flex-col items-center gap-2 px-4 lg:bottom-6 lg:pl-64"></div>`;
+
+  ligarIconesAnimados();
+
+  // Bloquear: volta para a tela de senha
+  document.querySelectorAll('[data-bloquear]').forEach((b) => (b.onclick = () => window.dispatchEvent(new Event('caixa:bloquear'))));
+
+  // "Pular para o conteúdo" sem trocar a rota (o # é usado pelas telas)
+  document.querySelector('[data-pular]').onclick = (e) => {
+    e.preventDefault();
+    document.getElementById('conteudo').focus();
+  };
+}
+
+const botaoMais = (rota, nome) =>
+  `<li class="flex justify-center"><a href="#${rota}" data-nav="${rota}" data-anima class="-mt-6 flex size-16 items-center justify-center rounded-full bg-brand-600 text-white shadow-lg ring-4 ring-white transition active:scale-95 dark:ring-stone-900" aria-label="${nome}">${iconeAnimado('mais', 'size-8')}</a></li>`;
+
+const navBaixo = (rota, nome, ic) =>
+  `<li><a href="#${rota}" data-nav="${rota}" data-anima class="nav-baixo">${iconeAnimado(ic, 'size-6')}<span>${nome}</span></a></li>`;
+
+/** Em qual módulo está a tela (Ajustes e Como usar ficam no módulo de onde a pessoa veio) */
+export function moduloDaRota(rota) {
+  if (ROTAS_RESINA[rota]) return 'resina';
+  if (rota === 'ajustes' || rota === 'ajuda') return moduloAtual;
+  return 'caixa';
+}
+
+export function marcarMenu(rota) {
+  const ativa = resinaAtiva();
+  moduloAtual = ativa ? moduloDaRota(rota) : 'caixa';
+  if (ROTAS_RESINA[rota]) seletorAtual = ROTAS_RESINA[rota];
+  else if (moduloAtual === 'caixa') seletorAtual = 'caixa';
+  document.querySelectorAll('[data-seletor-modulo]').forEach((n) => n.classList.toggle('hidden', !ativa));
+  document.querySelectorAll('[data-modulo-link]').forEach((a) => {
+    const sim = a.dataset.moduloLink === seletorAtual;
+    a.classList.toggle('ativo', sim);
+    sim ? a.setAttribute('aria-current', 'true') : a.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('[data-menu]').forEach((m) => {
+    const mostrar = m.dataset.menu === moduloAtual;
+    m.classList.toggle('hidden', !mostrar);
+    if (m.tagName === 'UL') m.classList.toggle('grid', mostrar);
+  });
+  document.querySelectorAll('[data-nav]').forEach((a) => {
+    const ativo = a.dataset.nav === rota;
+    a.classList.toggle('ativo', ativo);
+    ativo ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current');
+  });
+}
+
+/** Seletor de mês do cabeçalho. `aoMudar` é chamado quando a pessoa troca o mês. */
+export function seletorMes(visivel, aoMudar) {
+  const el = document.getElementById('seletor-mes');
+  if (!visivel) {
+    el.innerHTML = '';
+    return;
+  }
+  const desenhar = () => {
+    const atual = inicioMes(new Date());
+    const ehAtual = store.mes.getTime() === atual.getTime();
+    el.innerHTML = `
+      <div class="flex items-center justify-between gap-1 sm:justify-start" role="group" aria-label="Escolher mês">
+        <button type="button" class="btn-icone" data-mes="-1" aria-label="Mês anterior">${icone('esquerda')}</button>
+        <div class="min-w-0 flex-1 text-center sm:min-w-40 sm:flex-none">
+          <p class="font-semibold" aria-live="polite">${nomeMes(store.mes)}</p>
+          ${ehAtual ? '' : '<button type="button" data-mes="0" class="cursor-pointer text-xs font-semibold text-brand-700 underline underline-offset-2 dark:text-brand-400">Voltar para o mês atual</button>'}
+        </div>
+        <button type="button" class="btn-icone" data-mes="1" aria-label="Próximo mês">${icone('direita')}</button>
+      </div>`;
+  };
+  desenhar();
+  el.onclick = (e) => {
+    const b = e.target.closest('[data-mes]');
+    if (!b) return;
+    const n = Number(b.dataset.mes);
+    store.mes = n === 0 ? inicioMes(new Date()) : inicioMes(store.mes, n);
+    desenhar();
+    if (n !== 0) el.querySelector(`[data-mes="${n}"]`)?.focus();
+    aoMudar();
+  };
+  return desenhar;
+}
